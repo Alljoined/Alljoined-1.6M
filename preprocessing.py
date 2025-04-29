@@ -206,6 +206,7 @@ train_keep = compute_dropped_trials(
     epoched_train, train_df, verbose=ARGS.verbose
 )
 
+
 stim_order["dropped"] = True
 stim_order.loc[test_keep, "dropped"] = False
 stim_order.loc[train_keep, "dropped"] = False
@@ -215,7 +216,10 @@ stim_order.to_parquet(OUTPUT_DIR / "experiment_metadata.parquet")
 # MVNN whitening -----------------------------------------------------------
 if CONFIGS.mvnn_dim is not None:
     whitening_mats = compute_whitening_matrix(
-        CONFIGS.mvnn_dim, epoched_train, train_df, verbose=ARGS.verbose
+        CONFIGS.mvnn_dim,
+        epoched_train,
+        stim_order.query("partition == 'stim_train'"),
+        verbose=ARGS.verbose,
     )
     epoched_train = whiten(epoched_train, whitening_mats)
     epoched_test = whiten(epoched_test, whitening_mats)
@@ -226,13 +230,13 @@ if CONFIGS.mvnn_dim is not None:
 # --------------------------------------------------------------------------
 # save ---------------------------------------------------------------------
 save_data(
-    OUTPUT_DIR / "preprocessed_eeg_test.pkl",
+    OUTPUT_DIR / "preprocessed_eeg_test_flat.npy",
     epoched_test,
     CONFIGS,
     verbose=ARGS.verbose,
 )
 save_data(
-    OUTPUT_DIR / "preprocessed_eeg_train.pkl",
+    OUTPUT_DIR / "preprocessed_eeg_training_flat.npy",
     epoched_train,
     CONFIGS,
     verbose=ARGS.verbose,

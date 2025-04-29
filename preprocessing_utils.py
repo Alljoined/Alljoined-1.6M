@@ -310,11 +310,11 @@ def compute_dropped_trials(
             [int(code_to_desc[e].split(",")[3]) for e in ev[:, 2]]
         )
 
-        session_df = stim_order[stim_order["session"] == sess].copy()
-        session_df["image_idx"] = (
+        session_df = stim_order[(stim_order["session"] == sess)].copy()
+        session_df["image_index"] = (
             session_df["image_path"].str[-9:-4].astype(int)
         )
-        img_idx_arr = session_df["image_idx"].to_numpy()
+        img_idx_arr = session_df["image_index"].to_numpy()
 
         indices: List[int] = []
         ptr = 0  # pointer into img_idx_arr
@@ -360,9 +360,9 @@ def compute_whitening_matrix(
     print("Computing whitening matrices...")
     whitening_mats: List[np.ndarray] = []
     for sess in tqdm(SESSIONS, desc="Sessions", unit="sess"):
-        part_meta = stim_order[stim_order["session"] == sess].reset_index(
-            drop=True
-        )
+        part_meta = stim_order[
+            (stim_order["session"] == sess) & ~stim_order["dropped"]
+        ].reset_index(drop=True)
         data = epoched_datas[sess - 1].get_data()
 
         if mvnn_dim == "time":
@@ -433,13 +433,6 @@ def save_data(
             Defaults to ``False``.
     """
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-    if output_file.suffix == ".pkl":
-        with open(output_file, "wb") as f:
-            pickle.dump(datas, f, protocol=pickle.HIGHEST_PROTOCOL)
-        if verbose:
-            print(f"Saved session-wise Epochs to {output_file}")
-        return
 
     sfreq = datas[0].info["sfreq"]
     start = int(sfreq) // 5  # 0.2 s offset
