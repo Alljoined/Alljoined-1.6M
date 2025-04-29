@@ -103,6 +103,7 @@ sub = args.sub
 output_dir = os.path.join(
     project_dir, "preprocessed_data", "Alljoined-1.6M", f"sub-{sub:02d}"
 )
+os.makedirs(output_dir, exist_ok=True)
 metadata = pd.read_parquet(
     os.path.join(
         project_dir, "preprocessed_data", "Alljoined-1.6M", "metadata.parquet"
@@ -164,7 +165,7 @@ if args.mvnn_dim != "off":
     whitening_matrices = compute_whitening_matrix(
         mvnn_dim=args.mvnn_dim,
         epoched_datas=epoched_train,
-        stim_order=train_df[~train_df["dropped"]],
+        stim_order=train_df,
         verbose=args.verbose,
     )
 

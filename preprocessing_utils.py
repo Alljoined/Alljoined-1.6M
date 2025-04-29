@@ -205,8 +205,11 @@ def compute_stim_order(sub, epochs, metadata, verbose=False):
 
     dfs = []
     for s in SESSIONS:
-        anno = epochs[s - 1].annotations
-        trigger_values = [int(x.split(",")[1]) for x in anno.description]
+        events = epochs[s - 1].events
+        code_to_desc = {v: k for k, v in epochs[s - 1].event_id.items()}
+        trigger_values = np.array(
+            [int(code_to_desc[x].split(",")[3]) for x in events[:, 2]]
+        )
 
         df = []
         # Inherits the category information
@@ -390,7 +393,7 @@ def _process_session(
     data_dir = os.path.join(
         project_dir,
         "raw_eeg",
-        "repr_eeg2",
+        "Alljoined-1.6M",
         f"sub-{sub:02d}",
         f"session_{sess:02d}",
     )
@@ -443,7 +446,6 @@ def _process_session(
         preload=True,
         reject=reject,
         event_repeated="drop",
-        reject_by_annotation=None,
         verbose=verbose,
     )
 
