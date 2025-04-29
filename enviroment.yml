@@ -1,0 +1,15 @@
+name: aj-preprocessing
+channels:
+  - conda-forge
+  - default
+dependencies:
+  - python=3.10
+  - numpy=2.2.3
+  - scipy
+  - pyarrow
+  - scikit-learn
+  - pandas
+  - matplotlib
+  - joblib
+  - tqdm
+  - mne
