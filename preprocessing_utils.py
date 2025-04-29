@@ -1,8 +1,12 @@
+import argparse
+import dataclasses
 import inspect
 import os
 import pickle
 import sys
 import warnings
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import mne
 import numpy as np
@@ -12,41 +16,104 @@ from joblib import Parallel, delayed
 from sklearn.discriminant_analysis import _cov
 from tqdm.auto import tqdm
 
+###############################################################################
+# CONFIGURATION
+###############################################################################
+
+
+@dataclass
+class Configs:
+    """Container for all preprocessing hyper-parameters.
+
+    Attributes:
+        baseline (Tuple[Optional[float], float]):
+            Two-tuple ``(tmin, tmax)`` in **seconds** passed to
+            :class:`mne.Epochs` for baseline correction. ``tmin`` can be
+            ``None`` to use the first data sample.
+        tmin (float):
+            Start of the epoch (s) relative to the trigger.
+        tmax (float):
+            End of the epoch (s) relative to the trigger.
+        sfreq (int):
+            Target sampling frequency *after* resampling (Hz). Must be ≥ 250.
+        l_freq (Optional[float]):
+            Low cut-off for band-pass filter (Hz). ``None`` disables the low
+            edge.
+        h_freq (Optional[float]):
+            High cut-off for band-pass filter (Hz). ``None`` disables the high
+            edge.
+        notch_freqs (Optional[List[float]]):
+            Frequencies (Hz) for a notch filter. ``None`` disables notch
+            filtering.
+        mvnn_dim (str):
+            Multivariate noise-normalisation mode: ``"epochs"``, ``"time"`` or
+            ``"off"``.
+        reject (Optional[Dict[str, float]]):
+            Peak-to-peak rejection thresholds (volts) per channel name.
+            ``None`` disables automatic rejection.
+        verbose (bool):
+            Whether to print extra information during preprocessing.
+    """
+
+    baseline: Tuple[Optional[float], float] = (None, 0)
+    tmin: float = -0.2
+    tmax: float = 1.0
+    sfreq: int = 250
+    l_freq: Optional[float] = None
+    h_freq: Optional[float] = None
+    notch_freqs: Optional[List[float]] = None
+    mvnn_dim: str = "epochs"
+    reject: Optional[Dict[str, float]] = None
+    verbose: bool = False
+
+
+DEFAULT_CONFIGS = Configs()
 SESSIONS = list(range(1, 5))
 
+###############################################################################
+# HELPER FUNCTIONS
+###############################################################################
 
-def warn(msg):
+
+def _warn(msg: str) -> None:
+    """Emit a red-colored warning with filename and line context.
+
+    Args:
+        msg (str): Human-readable message to display.
+    """
     frame = inspect.currentframe().f_back
     file = os.path.basename(frame.f_code.co_filename)
     line = frame.f_lineno
-    print(f"\033[31mWarning: {msg} [{file}:{line}]\033[0m")
+    print(f"\033[31mWarning: {msg} [{file}:{line}]\033[0m", file=sys.stderr)
 
 
-def read_eeg_data(data_dir, contains="", verbose=False):
-    """
-    This function reads the EDF files in the specified blocks and
-    restricts the data to using the recommended method.
+def read_eeg_data(data_dir: str, contains: str = "", verbose: bool = False):
+    """Load a single EEG recording block.
+
+    The function loads an EDF file in a specific directory. There should be
+    only 1 EDF file present in the directory specified.
 
     Args:
-        data_dir: The directory containing the EDF files.
-        contains: The string to search for in the file names.
-        verbose: The verbose flag.
+        data_dir (str): Directory that **contains** the EDF file.
+        contains (str, optional): Sub-string that must be present in the file
+            name (e.g. to distinguish *stim* vs. *rest* recordings).
+            Defaults to "".
+        verbose (bool, optional): If ``True`` prints any warnings emitted by
+            :pymod:`mne` during file reading. Defaults to ``False``.
 
     Returns:
-        The raw EEG data.
+        mne.io.BaseRaw: Raw object restricted to EEG channels only.
+
+    Raises:
+        FileNotFoundError: If no matching EDF file is found.
     """
     edf_file = None
-
-    for item in os.listdir(os.path.join(data_dir)):
-        if item.endswith(".raw.fif") and contains in item:
-            edf_file = os.path.join(data_dir, item)
+    for fname in os.listdir(data_dir):
+        if fname.endswith(".edf") and contains in fname:
+            edf_file = os.path.join(data_dir, fname)
             break
-
     if edf_file is None:
-        for item in os.listdir(os.path.join(data_dir)):
-            if item.endswith(".edf") and contains in item:
-                edf_file = os.path.join(data_dir, item)
-                break
+        raise FileNotFoundError(f"No EDF file found in {data_dir!r}.")
 
     with warnings.catch_warnings(record=True) as w:
         if edf_file.endswith(".edf"):
@@ -54,445 +121,340 @@ def read_eeg_data(data_dir, contains="", verbose=False):
         else:
             raw = mne.io.read_raw_fif(edf_file, preload=True, verbose=False)
         if w and verbose:
-            print(
-                f"Loading EDF File {edf_file}: {w[0].message}", file=sys.stderr
-            )
+            print(f"Loading {edf_file}: {w[0].message}")
 
+    # Fix mis-capitalisation by EMOTIV
     if "Afz" in raw.info["ch_names"]:
         raw.rename_channels({"Afz": "AFz"})
-    eeg_channels = get_electrode_channels(raw)
-    raw.pick(eeg_channels)
 
-    montage = mne.channels.make_standard_montage("standard_1020")
-    raw.set_montage(montage)
-
+    raw.pick(_get_electrode_channels(raw))
+    raw.set_montage(mne.channels.make_standard_montage("standard_1020"))
     return raw
 
 
-def get_electrode_channels(raw):
-    """
-    This function checks the electrode channels being used for this EEG experiment.
+def _get_electrode_channels(raw) -> List[str]:
+    """Return genuine EEG channel names (drop markers, battery, etc.)."""
+    # fmt: off
+    bad_prefixes = {
+        "TimestampS", "TimestampMs", "OrTimestampS", "OrTimestampMs",
+        "Counter", "Interpolated", "RawCq", "Battery", "BatteryPercent",
+        "FwBufferSize", "FwClockTime", "MarkerHardware", "HighBitFlex",
+        "SaturationFlag", "CQ", "EQ", "MOT",
+    }
+    # fmt: on
+    return [
+        ch
+        for ch in raw.ch_names
+        if not any(ch.startswith(p) for p in bad_prefixes)
+    ]
+
+
+def _compute_sigma_cond(mvnn_dim: str, cond_data: np.ndarray) -> np.ndarray:
+    """Compute a condition-specific covariance matrix and average it.
 
     Args:
-        raw: The concatenated raw EEG data from all 16 blocks.
+        mvnn_dim (str): ``"epochs"`` or ``"time"`` — decides the covariance
+            computation axis.
+        cond_data (np.ndarray): Data array of shape
+            ``(trials, channels, time)`` for one image condition.
 
     Returns:
-        channels): The list of electrode channels that are selected for analysis.
-    """
+        np.ndarray: The mean covariance matrix for the given condition
+        (shape ``[n_channels, n_channels]``).
 
-    channels = raw.ch_names
-    # Filter out the bad prefix channels
-    bad_prefix = [
-        "TimestampS",
-        "TimestampMs",
-        "OrTimestampS",
-        "OrTimestampMs",
-        "Counter",
-        "Interpolated",
-        "RawCq",
-        "Battery",
-        "BatteryPercent",
-        "FwBufferSize",
-        "FwClockTime",
-        "MarkerHardware",
-        "HighBitFlex",
-        "SaturationFlag",
-        "CQ",
-        "EQ",
-        "MOT",
-    ]
-    channels = [
-        ch
-        for ch in channels
-        if not any([ch.startswith(prefix) for prefix in bad_prefix])
-    ]
-    return channels
+    """
+    if mvnn_dim not in {"time", "epochs"}:
+        raise ValueError(
+            f"mvnn_dim must be 'time' or 'epochs', got {mvnn_dim}"
+        )
+
+    # Demean across epochs to avoid bias from absolute potential shifts
+    cond_data = cond_data - cond_data.mean(axis=0, keepdims=True)
+
+    if mvnn_dim == "time":
+        # One covariance matrix per time point: (epochs × channels)
+        covs = [
+            _cov(cond_data[:, :, t], shrinkage="auto")
+            for t in range(cond_data.shape[2])
+        ]
+    else:  # 'epochs'
+        # One covariance matrix per epoch: (time × channels)
+        covs = [
+            _cov(cond_data[e].T, shrinkage="auto")
+            for e in range(cond_data.shape[0])
+        ]
+
+    return np.mean(covs, axis=0)
+
+
+###############################################################################
+# CORE PIPELINE
+###############################################################################
 
 
 def epoching(
-    sub,
+    sub: int,
     blocks,
-    project_dir,
-    baseline=(None, 0),
-    tmin=-0.2,
-    tmax=1,
-    sfreq=256,
-    l_freq=None,
-    h_freq=None,
-    notch_freqs=None,
-    reject=None,
-    verbose=False,
+    project_dir: str,
+    configs: Configs = DEFAULT_CONFIGS,
+    verbose: bool = False,
 ):
-    """
-    This function first converts the EEG data to MNE raw format, and
-    performs channel selection, epoching, baseline correction and frequency
-    downsampling.
+    """Epoch and filter EEG data for a given subject.
 
     Args:
-        sub: The subject number.
-        project_dir: The project directory.
-        baseline: The baseline correction.
-        tmin: The start time of the epoch.
-        tmax: The end time of the epoch.
-        sfreq: The sampling frequency.
-        l_freq: The low frequency cutoff for the bandpass filter.
-        h_freq: The high frequency cutoff for the bandpass filter.
-        notch_freqs: The notch filter frequencies.
-        reject: The rejection thresholds for the EEG data.
-            If None, then no rejection is performed.
-            If a dictionary is given, then the keys are the channel names
-            and the values are the rejection thresholds.
-        test_train_split: The block number that test blocks end, if None, only
-            training data is returned.
-        verbose: The verbose flag.
-
-    Returns
-        epoched_tests: epoched EEG data (trials, channels, time points),
-            for each session.
-        epoched_trains: same as epoched_test, but for training data.
-        ch_names: EEG channel names.
-        times: EEG time points.
-    """
-    print("Epoching...")
-
-    assert sfreq >= 250, "Sampling frequency should be at least 250 Hz"
-
-    # Use joblib to parallelize session processing
-    # list of epoched_train or list of (epoched_test, epoched_train)
-    epoched_datas = Parallel(n_jobs=-1)(
-        delayed(_process_session)(
-            sub,
-            s,
-            blocks,
-            project_dir,
-            baseline=baseline,
-            tmin=tmin,
-            tmax=tmax,
-            sfreq=sfreq,
-            l_freq=l_freq,
-            h_freq=h_freq,
-            notch_freqs=notch_freqs,
-            reject=reject,
-            verbose=verbose,
-        )
-        for s in SESSIONS
-    )
-
-    return epoched_datas
-
-
-def compute_stim_order(sub, epochs, metadata, verbose=False):
-    """
-    Reconstructs the stimulus order for a given subject from EEG epochs and
-    metadata.
-
-    This function extracts stimulus trigger information from annotations in EEG
-    epochs and uses it to build a DataFrame containing metadata entries for
-    each trial. It filters out non-oddball trials and appends relevant session
-    and dataset information.
-
-    Args:
-        sub: Subject identifier.
-        epochs: A list of EEG epoch objects, each containing annotations.
-        metadata: DataFrame containing metadata for all stimuli, indexed by
-            trigger value.
-        verbose: If True, enables verbose output. Defaults to False.
+        sub (int): Subject identifier (1-based; *not* zero-padded).
+        blocks (Iterable[int]): Block indices **within** a session (1-based).
+        project_dir (str): Base directory containing
+            ``raw_eeg/Alljoined-1.6M``.
+        configs (Configs, optional): Pre-processing configuration.
+            Defaults to ``DEFAULT_CONFIGS``.
+        verbose (bool, optional): Forwarded to low-level MNE functions.
+            Defaults to ``False``.
 
     Returns:
-        pd.DataFrame: A DataFrame containing the reconstructed trial metadata,
-        including session, dataset, subject, and image path information.
-    """
+        list[mne.Epochs]: One Epochs object per recording session.
 
-    dfs = []
-    for s in SESSIONS:
-        events = epochs[s - 1].events
-        code_to_desc = {v: k for k, v in epochs[s - 1].event_id.items()}
-        trigger_values = np.array(
-            [int(code_to_desc[x].split(",")[3]) for x in events[:, 2]]
+    Raises:
+        ValueError: If ``configs.sfreq`` is lower than 250 Hz.
+    """
+    if configs.sfreq < 250:
+        raise ValueError("Sampling frequency must be at least 250 Hz.")
+
+    def _process_session(sess: int):
+        """Helper that loads and epochs a single session."""
+        data_dir = os.path.join(
+            project_dir,
+            "raw_eeg",
+            "Alljoined-1.6M",
+            f"sub-{sub:02d}",
+            f"session_{sess:02d}",
+        )
+        raws = [
+            read_eeg_data(
+                os.path.join(data_dir, f"block_{idx:02d}"), verbose=verbose
+            )
+            for idx in blocks
+        ]
+
+        # Filter and make annotation descriptions unique
+        for b_idx, raw in enumerate(raws, start=1):
+            a = raw.annotations
+            if configs.l_freq is not None or configs.h_freq is not None:
+                raw.filter(configs.l_freq, configs.h_freq, verbose=verbose)
+            if configs.notch_freqs is not None:
+                raw.notch_filter(configs.notch_freqs, verbose=verbose)
+            raw.set_annotations(
+                mne.Annotations(
+                    onset=a.onset,
+                    duration=a.duration,
+                    description=[
+                        f"session_{sess},block_{b_idx},{d}"
+                        for d in a.description
+                    ],
+                    orig_time=a.orig_time,
+                )
+            )
+
+        raw_concat = mne.concatenate_raws(raws)
+        events, event_id = mne.events_from_annotations(
+            raw_concat, regexp=".*stim", verbose=False
         )
 
-        df = []
-        # Inherits the category information
-        for t in trigger_values:
-            if t < 99999:  # Otherwise oddball
-                df.append(metadata.iloc[t])
-        df = pd.DataFrame(df)
-        df["dataset"] = "Alljoined-1.6M"
-        df["session"] = s
-        dfs.append(df)
+        epochs = mne.Epochs(
+            raw_concat,
+            events,
+            event_id=event_id,
+            tmin=configs.tmin,
+            tmax=configs.tmax,
+            baseline=configs.baseline,
+            preload=True,
+            reject=configs.reject,
+            event_repeated="drop",
+            verbose=verbose,
+        )
+        if epochs.info["sfreq"] != configs.sfreq:
+            epochs.resample(configs.sfreq, verbose=verbose)
+        return epochs
 
-    df = pd.concat(dfs, ignore_index=True)
+    print("Epoching...")
+    return Parallel(n_jobs=-1)(delayed(_process_session)(s) for s in SESSIONS)
 
-    # Reorganize filepath columns
-    df = df.drop(columns=["fname"]).rename(columns={"filepath": "image_path"})
-    df["subject"] = sub
-    print(f"Recreated {len(df)} trials from raw EEG data")
-    return df
+
+def compute_dropped_trials(
+    epochs: List[mne.Epochs],
+    stim_order: pd.DataFrame,
+    verbose: bool = False,
+) -> np.ndarray:
+    """Return indices of trials that have a *matching* trigger in the EEG.
+
+    For each session we treat the recorded trigger values as a subsequence that
+    should appear (in order) within *stim_order*.  Any rows of *stim_order*
+    that are skipped constitute *dropped trials*.
+
+    Args:
+        epochs (list[mne.Epochs]): One :class:`mne.Epochs` object per session.
+        stim_order (pd.DataFrame): Stimulus-order metadata for **all** sessions.
+        verbose (bool, optional): If ``True``, print warnings about dropped
+            triggers. Defaults to ``False``.
+
+    Returns:
+        np.ndarray: A 1-D array of row indices (into ``stim_order``) that
+        survived all trigger-matching checks across sessions.
+    """
+    print("Computing dropped trials...")
+    kept_indices: List[int] = []
+    for sess in SESSIONS:
+        ev = epochs[sess - 1].events
+        code_to_desc = {v: k for k, v in epochs[sess - 1].event_id.items()}
+        trigger_vals = np.array(
+            [int(code_to_desc[e].split(",")[3]) for e in ev[:, 2]]
+        )
+
+        session_df = stim_order[stim_order["session"] == sess].copy()
+        session_df["image_idx"] = (
+            session_df["image_path"].str[-9:-4].astype(int)
+        )
+        img_idx_arr = session_df["image_idx"].to_numpy()
+
+        indices: List[int] = []
+        ptr = 0  # pointer into img_idx_arr
+        for val in trigger_vals:
+            while ptr < len(img_idx_arr) and img_idx_arr[ptr] != val:
+                ptr += 1
+            if ptr == len(img_idx_arr):
+                raise ValueError(
+                    f"Session {sess}: trigger sequence is not a subsequence of"
+                    " stim_order."
+                )
+            indices.append(session_df.index[ptr])
+            ptr += 1
+
+        n_dropped = len(img_idx_arr) - len(indices)
+        if verbose and n_dropped:
+            _warn(f"{n_dropped} triggers dropped in session {sess}")
+
+        kept_indices.extend(indices)
+    return np.array(kept_indices)
 
 
 def compute_whitening_matrix(
-    mvnn_dim,
-    epoched_datas,
-    stim_order,
-    verbose=False,
-):
-    """
-    Compute the covariance matrices of the EEG data (calculated for each
-    time-point or epoch/repetitions of each image condition), and then average
-    them across image conditions and data partitions. The inverse of the
-    resulting averaged covariance matrix is used to whiten the EEG data
-    (independently for each session).
+    mvnn_dim: str,
+    epoched_datas: List[mne.Epochs],
+    stim_order: pd.DataFrame,
+    verbose: bool = False,
+) -> List[np.ndarray]:
+    """Compute MVNN whitening matrices session-wise.
 
     Args:
-        mvnn_dim: The dimension to compute the covariance matrices.
-        epoched_datas: The epoched EEG data.
-        stim_order: The stimulus order.
-        sessions: The list of sessions to compute the whitening matrices.
-            if None, it is inferred from the epoched data.
-        verbose: The verbose flag.
+        mvnn_dim (str): Dimension along which to compute covariance
+            (``"epochs"`` or ``"time"``).
+        epoched_datas (list[mne.Epochs]): Epoched EEG data for every session.
+        stim_order (pd.DataFrame): Metadata used to group trials by image.
+        verbose (bool, optional): If ``True``, emit informative warnings.
+            Defaults to ``False``.
 
     Returns:
-        whitening_mats: The whitening matrices.
+        list[np.ndarray]: One whitening matrix (shape
+        ``[n_channels, n_channels]``) per session in ``SESSIONS`` order.
     """
-
     print("Computing whitening matrices...")
-
-    ### Loop across data collection sessions ###
-    whitening_mats = []
-    for i in tqdm(SESSIONS, desc="Sessions", unit="sess"):
-        part_metadata = stim_order[(stim_order["session"] == i)].reset_index(
+    whitening_mats: List[np.ndarray] = []
+    for sess in tqdm(SESSIONS, desc="Sessions", unit="sess"):
+        part_meta = stim_order[stim_order["session"] == sess].reset_index(
             drop=True
         )
-        session_data = epoched_datas[i - 1].get_data()
-        # Image conditions covariance matrix of shape:
-        # Image conditions × EEG channels × EEG channels
+        data = epoched_datas[sess - 1].get_data()
+
         if mvnn_dim == "time":
-            only_one_trial = (
-                part_metadata.groupby("image_path")
-                .filter(lambda x: len(x) == 1)
-                .reset_index(drop=True)["image_index"]
-                .tolist()
+            single_trial_imgs = part_meta.groupby("image_path").filter(
+                lambda g: len(g) == 1
             )
-            if len(only_one_trial) > 0 and verbose:
-                warn(
-                    f"{len(only_one_trial)} Image conditions with only one"
-                    " trial"
+            if not single_trial_imgs.empty and verbose:
+                _warn(
+                    f"{len(single_trial_imgs)} image conditions with only one"
+                    f" trial in session {sess}"
                 )
+
         sigma_cond = np.array(
             Parallel(n_jobs=-1)(
-                delayed(_compute_sigma_cond)(
-                    mvnn_dim, session_data[group.index]
-                )
-                for _, group in tqdm(
-                    part_metadata.groupby("image_path"),
-                    desc="Image conditions",
+                delayed(_compute_sigma_cond)(mvnn_dim, data[g.index])
+                for _, g in tqdm(
+                    part_meta.groupby("image_path"),
+                    desc="Images",
                     unit="img",
                     leave=False,
                 )
             )
         )
-        # Average the covariance matrices across image conditions
         sigma_tot = sigma_cond.mean(axis=0)
         whitening_mats.append(
             scipy.linalg.fractional_matrix_power(sigma_tot, -0.5)
         )
-
     return whitening_mats
 
 
-def whiten(epoched_datas, whitening_matrices):
-    """
-    Apply the computed whitening matrices to each session of epoched EEG data.
+def whiten(
+    epoched_datas: List[mne.Epochs], whitening_matrices: List[np.ndarray]
+) -> List[mne.Epochs]:
+    """Apply MVNN whitening matrices in-place and return the modified list.
 
     Args:
-        epoched_datas: List of mne.Epochs objects for each session.
-        whitening_matrices: List of whitening matrices corresponding to each session.
-
+        epoched_datas (list[mne.Epochs]): Data to be whitened (modified in-place).
+        whitening_matrices (list[np.ndarray]): One pre-computed whitening
+            matrix per session.
     Returns:
-        List of whitened mne.Epochs objects.
+        list[mne.Epochs]: The same list as ``epoched_datas`` but with each
+        dataset's ``_data`` array replaced by its whitened version.
+
     """
-    for i in range(len(epoched_datas)):
-        data = epoched_datas[i].get_data()
-        data = whitening_matrices[i] @ data
-        epoched_datas[i]._data = data
+    for i, epochs in enumerate(epoched_datas):
+        epochs._data = whitening_matrices[i] @ epochs.get_data()
     return epoched_datas
 
 
 def save_data(
-    output_file,
-    datas,
-    verbose=False,
+    output_file: str,
+    datas: List[mne.Epochs],
+    configs: Configs,
+    verbose: bool = False,
 ):
-    """
-    Merge the EEG data of all sessions together, shuffle the EEG repetitions
-    across sessions and reshaping the data to the format:
-    Image conditions x EEG repetitions x EEG channels x EEG time points.
-    Then, the data of both test and training EEG partitions is saved.
+    """Persist pre-processed data to *output_file*.
+
+    If *output_file* ends with ``.pkl`` the list of Epochs is pickled directly.
+    Otherwise a flat NumPy array is saved (also pickled) together with channel
+    names, times and the serialised ``Configs``.
 
     Args:
-        output_file: The output file.
-        datas: The whitened EEG data.
-        no_merge: The flag to not merge the data across sessions.
-        verbose: The verbose flag.
+        output_file (str): Path where the NumPy/Pickle file will be written.
+        datas (list[mne.Epochs]): Whitened, epoched EEG data (one per session).
+        configs (Configs): The exact configuration object used to create the
+            data (pickled alongside the output).
+        verbose (bool, optional): Print extra status messages when ``True``.
+            Defaults to ``False``.
     """
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
-    output_dir = os.path.dirname(output_file)
-
-    # Saving directories
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    if output_file.endswith(".pkl"):
-        # Dump just the session wise mne.Epoch object
+    if output_file.suffix == ".pkl":
         with open(output_file, "wb") as f:
             pickle.dump(datas, f, protocol=pickle.HIGHEST_PROTOCOL)
-        print(f"Saved preprocessed data to {output_file}")
+        if verbose:
+            print(f"Saved session-wise Epochs to {output_file}")
         return
 
-    ### Merge and save the data ###
-    # Data matrix of shape:
-    # trials × EEG channels × EEG time points
     sfreq = datas[0].info["sfreq"]
-    start = int(sfreq) // 5
-    end = start + 250
-    epoched_data = [x.get_data()[..., start:end] for x in datas]
-    merged_data = np.concatenate(epoched_data, axis=0)
-    ch_names = datas[0].info["ch_names"]
-    times = datas[0].times
-    # Shuffle the repetitions of different sessions
-    # Insert the data into a dictionary
-    train_dict = {
-        "preprocessed_eeg_data": merged_data,
-        "ch_names": ch_names,
-        "times": times,
+    start = int(sfreq) // 5  # 0.2 s offset
+    end = start + 250  # 1 s window at 250 Hz
+
+    merged = np.concatenate(
+        [x.get_data()[..., start:end] for x in datas], axis=0
+    )
+    export_dict = {
+        "preprocessed_eeg_data": merged,
+        "configs": dataclasses.asdict(configs),
+        "ch_names": datas[0].info["ch_names"],
+        "times": datas[0].times[start:end],
     }
-    # Dump the data that can be used for model training
     with open(output_file, "wb") as f:
-        pickle.dump(train_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
-    print(f"Saved preprocessed data to {output_file}")
-
-
-# Epoch the given session
-def _process_session(
-    sub,
-    sess,
-    blocks,
-    project_dir,
-    baseline=(None, 0),
-    tmin=-0.2,
-    tmax=1,
-    sfreq=256,
-    l_freq=None,
-    h_freq=None,
-    notch_freqs=None,
-    reject=None,
-    verbose=False,
-):
-
-    # Load the EEG data
-    data_dir = os.path.join(
-        project_dir,
-        "raw_eeg",
-        "Alljoined-1.6M",
-        f"sub-{sub:02d}",
-        f"session_{sess:02d}",
-    )
-    raws = [
-        read_eeg_data(
-            os.path.join(data_dir, f"block_{index:02d}"), verbose=verbose
-        )
-        for index in blocks
-    ]
-
-    # Make event names unique
-    for i in range(len(blocks)):
-        a = raws[i].annotations
-
-        # Highpass lowpass
-        if l_freq != None or h_freq != None:
-            raws[i].filter(l_freq=l_freq, h_freq=h_freq, verbose=verbose)
-
-        # Notch filter
-        if notch_freqs != None:
-            raws[i].notch_filter(notch_freqs, verbose=verbose)
-
-        raws[i].set_annotations(
-            mne.Annotations(
-                onset=a.onset,
-                duration=a.duration,
-                description=[
-                    f"session_{sess},block_{i+1},{x}" for x in a.description
-                ],
-                orig_time=a.orig_time,
-            )
-        )
-
-    raws = mne.concatenate_raws(raws)
-
-    events, event_id = mne.events_from_annotations(
-        raws,
-        regexp=".*stim",
-        verbose=False,
-    )
-
-    ### Epoching, baseline correction and resampling ###
-    epochs = mne.Epochs(
-        raws,
-        events,
-        event_id=event_id,
-        tmin=tmin,
-        tmax=tmax,
-        baseline=baseline,
-        preload=True,
-        reject=reject,
-        event_repeated="drop",
-        verbose=verbose,
-    )
-
-    # Resampling IF sfreq is not 256, which is hardcoded but shouldn't be!
-    # TODO: we should have a class that determines which hardware we're using
-    # and the sfreq it collects
-    if sfreq != 256:
-        epochs.resample(sfreq, verbose=verbose)
-
-    return epochs
-
-
-def _compute_sigma_cond(mvnn_dim, cond_data):
-    """
-    This function computes the average covariance matrix of a specific
-    image condition, over all timestamps.
-    """
-
-    # Compute covariace matrices at each time point, and then
-    # average across time points
-
-    if mvnn_dim not in ["time", "epochs"]:
-        raise ValueError(
-            f"mvnn_dim should be either 'time' or 'epochs', got {mvnn_dim}"
-        )
-
-    cond_data = cond_data - np.mean(cond_data, axis=0, keepdims=True)
-
-    with warnings.catch_warnings(record=True):
-        if mvnn_dim == "time":
-            return np.mean(
-                [
-                    _cov(cond_data[:, :, t], shrinkage="auto")
-                    for t in range(cond_data.shape[2])
-                ],
-                axis=0,
-            )
-        # Compute covariace matrices at each epoch (EEG repetition),
-        # and then average across epochs/repetitions
-        elif mvnn_dim == "epochs":
-            return np.mean(
-                [
-                    _cov(
-                        np.transpose(cond_data[e]),
-                        shrinkage="auto",
-                    )
-                    for e in range(cond_data.shape[0])
-                ],
-                axis=0,
-            )
+        pickle.dump(export_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
+    if verbose:
+        print(f"Saved flat data to {output_file}")
