@@ -68,6 +68,40 @@ def _make_configs_from_args(args: argparse.Namespace) -> Configs:
         reject=args.reject,
     )
 
+def _make_suffix_from_configs(args):
+    suffix = []
+    
+    # Check each argument against its default value
+    #if args.baseline != "(None, 0.0)":  # Default baseline value
+    #    suffix.append(f"baseline_{args.baseline}")
+    
+    if args.tmin != -0.2:  # Default tmin value
+        suffix.append(f"tmin_{args.tmin}")
+    
+    if args.tmax != 1.0:  # Default tmax value
+        suffix.append(f"tmax_{args.tmax}")
+    
+    if args.sfreq != 250:  # Default sfreq value
+        suffix.append(f"sfreq_{args.sfreq}")
+    
+    if args.l_freq is not None:  # Default l_freq is None
+        suffix.append(f"l_freq_{args.l_freq}")
+    
+    if args.h_freq is not None:  # Default h_freq is None
+        suffix.append(f"h_freq_{args.h_freq}")
+    
+    if args.notch_freqs is not None:  # Default notch_freqs is None
+        suffix.append(f"notch__{'_'.join(map(str, args.notch_freqs))}")
+    
+    if args.mvnn_dim != "epochs":  # Default mvnn_dim value
+        suffix.append(f"mvnn_{args.mvnn_dim}")
+    
+    if args.reject is not None:  # Default reject is None
+        suffix.append(f"RJ_{args.reject}")
+
+    # If suffix list is not empty, join and return it; otherwise return an empty string
+    return "_".join(suffix) if suffix else ""
+
 
 # --------------------------------------------------------------------------
 # CLI ----------------------------------------------------------------------
@@ -154,11 +188,24 @@ parser.add_argument(
     help="Enable verbose output during preprocessing",
 )
 
+parser.add_argument(
+    "--suffix",
+    type=str,
+    default=None,
+    help="Suffix to append to the output files",
+)
+
 ARGS = parser.parse_args()
+
+suffix = _make_suffix_from_configs(ARGS)
+
+print(ARGS.baseline)
+print(suffix)
 
 # --------------------------------------------------------------------------
 # main ---------------------------------------------------------------------
 # --------------------------------------------------------------------------
+
 
 mne.set_log_level("WARNING" if not ARGS.verbose else "INFO")
 
@@ -224,19 +271,19 @@ if CONFIGS.mvnn_dim is not None:
     epoched_train = whiten(epoched_train, whitening_mats)
     epoched_test = whiten(epoched_test, whitening_mats)
 
-    with open(OUTPUT_DIR / "mvnn_whitening_matrices.pkl", "wb") as f:
+    with open(OUTPUT_DIR / f"mvnn_whitening_matrices{suffix}.pkl", "wb") as f:
         pickle.dump(whitening_mats, f)
 
 # --------------------------------------------------------------------------
 # save ---------------------------------------------------------------------
 save_data(
-    OUTPUT_DIR / "preprocessed_eeg_test_flat.npy",
+    OUTPUT_DIR / f"preprocessed_eeg_test_flat{suffix}.npy",
     epoched_test,
     CONFIGS,
     verbose=ARGS.verbose,
 )
 save_data(
-    OUTPUT_DIR / "preprocessed_eeg_training_flat.npy",
+    OUTPUT_DIR / f"preprocessed_eeg_training_flat{suffix}.npy",
     epoched_train,
     CONFIGS,
     verbose=ARGS.verbose,
