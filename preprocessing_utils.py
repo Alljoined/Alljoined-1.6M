@@ -205,7 +205,7 @@ def epoching(
         sub (int): Subject identifier (1-based; *not* zero-padded).
         blocks (Iterable[int]): Block indices **within** a session (1-based).
         project_dir (str): Base directory containing
-            ``raw_eeg/Alljoined-1.6M``.
+            ``raw_eeg/Alljoined-1.7M``.
         configs (Configs, optional): Pre-processing configuration.
             Defaults to ``DEFAULT_CONFIGS``.
         verbose (bool, optional): Forwarded to low-level MNE functions.
@@ -225,7 +225,7 @@ def epoching(
         data_dir = os.path.join(
             project_dir,
             "raw_eeg",
-            "Alljoined-1.6M",
+            "Alljoined-1.7M",
             f"sub-{sub:02d}",
             f"session_{sess:02d}",
         )
