@@ -65,7 +65,7 @@ def _make_configs_from_args(args: argparse.Namespace) -> Configs:
         h_freq=args.h_freq,
         notch_freqs=args.notch_freqs,
         mvnn_dim=args.mvnn_dim,
-        reject=args.reject,
+        reject=args.reject
     )
 
 def _make_suffix_from_configs(args):
@@ -96,8 +96,17 @@ def _make_suffix_from_configs(args):
     if args.mvnn_dim != "epochs":  # Default mvnn_dim value
         suffix.append(f"mvnn_{args.mvnn_dim}")
     
-    if args.reject is not None:  # Default reject is None
-        suffix.append(f"RJ_{args.reject}")
+    if args.reject is not None:
+        
+        if isinstance(args.reject, dict) and 'eeg' in args.reject:
+            suffix.append(f"RJ_{int(args.reject['eeg'] * 1e6)}")
+        else:
+            suffix.append(f"RJ_{args.reject}")
+
+    if args.suffix is not None:
+        suffix.append(f"_{args.suffix}")
+
+    print(f"Final Suffix is {suffix}")
 
     # If suffix list is not empty, join and return it; otherwise return an empty string
     return "_".join(suffix) if suffix else ""
@@ -189,6 +198,12 @@ parser.add_argument(
 )
 
 parser.add_argument(
+    "--overwrite",
+    action="store_true",
+    help="Enable the script to overwrite files that have already been processed",
+)
+
+parser.add_argument(
     "--suffix",
     type=str,
     default=None,
@@ -199,7 +214,7 @@ ARGS = parser.parse_args()
 
 suffix = _make_suffix_from_configs(ARGS)
 
-print(ARGS.baseline)
+print(ARGS.reject)
 print(suffix)
 
 # --------------------------------------------------------------------------
@@ -214,9 +229,26 @@ SUB = ARGS.sub
 CONFIGS = _make_configs_from_args(ARGS)
 
 OUTPUT_DIR = (
-    PROJECT_DIR / "preprocessed_data" / "Alljoined-1.6M" / f"sub-{SUB:02d}"
+    PROJECT_DIR / "preprocessed_data" / "Alljoined-1.7M" / f"sub-{SUB:02d}"
 )
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ---- Check if file already exists ----------------------------------------
+
+import sys
+
+output_file = OUTPUT_DIR / f"preprocessed_eeg_training_flat{suffix}.npy"
+
+if output_file.exists() and not ARGS.overwrite:
+    print(f"⚠️ Output already exists at {output_file} and overwrite is disabled.")
+    sys.exit(0)  # Exit silently without error
+
+# ---- Start running
+
+print(f"Running subject {SUB}, suffix {suffix}, output folder {OUTPUT_DIR}")
+
+# ---- Read Parquet with data
 
 stim_order = pd.read_parquet(OUTPUT_DIR / "stim_order.parquet")
 
@@ -257,7 +289,7 @@ train_keep = compute_dropped_trials(
 stim_order["dropped"] = True
 stim_order.loc[test_keep, "dropped"] = False
 stim_order.loc[train_keep, "dropped"] = False
-stim_order.to_parquet(OUTPUT_DIR / "experiment_metadata.parquet")
+stim_order.to_parquet(OUTPUT_DIR / f"experiment_metadata{suffix}.parquet")
 
 # --------------------------------------------------------------------------
 # MVNN whitening -----------------------------------------------------------
