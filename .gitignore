@@ -1,2 +1,3 @@
 __pycache__
-slurm-24118.out
+*.out
+*.err
