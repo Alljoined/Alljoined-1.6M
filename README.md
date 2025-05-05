@@ -1,4 +1,4 @@
-# Alljoined-1.6M
+# Alljoined-1.7M
 
 ## Setup
 
@@ -39,4 +39,4 @@ In this stage, we concatenate all the raw edf files for each block, filter out o
 
 ### MVNN
 
-The next stage is whitening the data, we throw the epoched training data, for each image condition, we compute the covariance of the channels for each timestamp, and then take the average. Then we take the average of all the average covariance matrix for each image condition, to obtain this average of average covariance matrix $\Sigma_{cond}$ and then apply $\Sigma_{cond}^{-1/2}$ to every epoched train and test trial.
+The next stage is whitening the data, we throw the epoched training data, for each image condition, we compute the covariance of the channels for each timestamp, and then take the average. Then we take the average of all the average covariance matrix for each image condition, to obtain this average of average covariance matrix $\Sigma_{cond}$ and then apply $\Sigma_{cond}^{-1/2}$ to every epoched train and test trial.Z
