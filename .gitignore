@@ -1,2 +1,3 @@
 __pycache__
-slurm_logs/preproc_sub$1_24116.err
+*.err
+*.out
