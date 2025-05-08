@@ -1,0 +1,5 @@
+S
+*.out
+*.err
+/__pycache__
+/slurm_logs/
