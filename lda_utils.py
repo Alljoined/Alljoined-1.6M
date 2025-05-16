@@ -1,6 +1,7 @@
 import numpy as np
 from joblib import Parallel, delayed
 from sklearn.metrics import accuracy_score
+from sklearn.metrics import roc_auc_score
 from tqdm import tqdm
 
 
@@ -30,6 +31,14 @@ def process_window(
     train_y = np.array([1] * train_A.shape[0] + [2] * train_B.shape[0])
     test_y = np.array([1] * test_A.shape[0] + [2] * test_B.shape[0])
 
+    max_size_train = max(train_A.shape[0],train_B.shape[0]) # get the minimum size of data, ideally not
+    max_size_test = max(test_A.shape[0],test_B.shape[0]) # get the minimum size of data, ideally not
+
+    #print("Calculating Averages")
+
+    train_x, train_y = average_trials(train_x, train_y, average_trials=10, max_sampling = max_size_train)  
+    test_x, test_y = average_trials(test_x, test_y, average_trials=10, max_sampling = max_size_test) 
+
     if np.ndim(train_x) > 2:
         train_x = train_x.reshape(
             train_x.shape[0], train_x.shape[1] * train_x.shape[2]
@@ -52,10 +61,10 @@ def process_window(
 
         # test it on same time points
         pred_y = classifier.predict(test_x)
-        acc = accuracy_score(test_y, pred_y)
-        return {"accuracy": acc, "time": t}
+        acc = roc_auc_score(test_y, pred_y)
+        return {"AUC": acc, "time": t}
     else:
-        return {"accuracy": 0, "time": t}
+        return {"AUC": 0, "time": t}
 
 
 def run_LDA(
@@ -253,3 +262,35 @@ def get_words_in_categories(categories_spec, hierarchy):
             final_words.add(item)
 
     return list(final_words)
+
+
+
+def average_trials(data, labels, average_trials=5,max_sampling=1000):
+
+    #print(f'Start Averaging {average_trials} Trials with Sampling {max_sampling}')
+    if average_trials < 2:
+        averaged_data = data
+        averaged_labels = labels
+    else:
+
+        averaged_data = []
+        averaged_labels = []
+
+        # Separate data based on labels
+        unique_labels = np.unique(labels)
+        # PARALELLIZE
+        for label in unique_labels:
+            label_data = data[labels == label]
+
+            # Loop over the data and collect averages with substitution
+            for _ in range(int(max_sampling)):
+                # Sample with replacement
+                indices = np.random.choice(label_data.shape[0], 5, replace=True)
+                batch_data = label_data[indices]
+                
+                # Compute average and append to list
+                averaged_trial = np.mean(batch_data, axis=0)
+                averaged_data.append(averaged_trial)
+                averaged_labels.append(label)
+
+    return np.array(averaged_data), np.array(averaged_labels)

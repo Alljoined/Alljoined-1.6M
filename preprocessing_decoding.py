@@ -14,6 +14,8 @@ from mne.decoding import CSP
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer
+from sklearn.svm import LinearSVC
+from mne.decoding import CSP
 
 from all_categories import get_categories
 from lda_utils import prep_decoding_data_hierarchical, run_LDA
@@ -55,7 +57,7 @@ def _mvnn_arg(text: str) -> str | None:
     )
 
 
-def _make_configs_from_args(ARGS: argparse.Namespace) -> Configs:
+def _make_configs_from_ARGS(ARGS: argparse.Namespace) -> Configs:
     """Instantiate a Configs object from parsed CLI ARGS."""
     return Configs(
         baseline=ARGS.baseline,
@@ -143,6 +145,14 @@ parser.add_argument(
     help="MVNN mode (off to skip whitening)",
 )
 
+parser.add_argument(
+    "--dataset",
+    type=str,
+    default="Alljoined-1.6M",
+    help="selected dataset to run script",
+)
+
+
 # misc ---------------------------------------------------------------------
 parser.add_argument(
     "--project_dir",
@@ -155,8 +165,10 @@ parser.add_argument(
     help="Enable verbose output during preprocessing",
 )
 
-parser.add_argument("--cat1", default="Animals", type=str)
-parser.add_argument("--cat2", default="Food_Drink_Plants_Fungi", type=str)
+parser.add_argument("--suffix", default="", type=str)
+
+parser.add_argument("--cat1", default="animals", type=str)
+parser.add_argument("--cat2", default="foods_and_plants", type=str)
 
 ARGS = parser.parse_args()
 
@@ -168,7 +180,9 @@ mne.set_log_level("WARNING" if not ARGS.verbose else "INFO")
 
 PROJECT_DIR = Path(ARGS.project_dir)
 SUB = ARGS.sub
-CONFIGS = _make_configs_from_args(ARGS)
+dataset = ARGS.dataset
+CONFIGS = _make_configs_from_ARGS(ARGS)
+
 
 OUTPUT_DIR = (
     PROJECT_DIR / "preprocessed_data" / "Alljoined-1.6M" / f"sub-{SUB:02d}"
@@ -178,57 +192,41 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 cat1 = ARGS.cat1
 cat2 = ARGS.cat2
 
-stim_order = pd.read_parquet(OUTPUT_DIR / "stim_order.parquet")
-metadata = pd.read_parquet(
-    PROJECT_DIR / "preprocessed_data" / "Alljoined-1.6M" / "metadata.parquet"
-)
-stim_order["super_category"] = stim_order["image_path"].map(
-    metadata.set_index("filepath")["super_category"]
+test_data_path = os.path.join(
+    ARGS.project_dir, "preprocessed_data", ARGS.dataset, f"sub-{ARGS.sub:02d}", f"preprocessed_eeg_test_flat.npy"
 )
 
-# ---- subject-specific fix (trigger swap) ---------------------------------
-if SUB == 6:
-    print("Swapping mismatched triggers for subject 6")
-    row_to_move = stim_order.iloc[73762]
-    stim_order = pd.concat(
-        [
-            stim_order.drop(index=73762).iloc[:73760],
-            row_to_move.to_frame().T,
-            stim_order.drop(index=73762).iloc[73760:],
-        ]
-    )
-
-# --------------------------------------------------------------------------
-# epoching -----------------------------------------------------------------
-TEST_BLOCKS: range = range(1, 5)
-TRAIN_BLOCKS: range = range(5, 20)
-
-epoched_test = epoching(
-    SUB, TEST_BLOCKS, PROJECT_DIR, configs=CONFIGS, verbose=ARGS.verbose
-)
-epoched_train = epoching(
-    SUB, TRAIN_BLOCKS, PROJECT_DIR, configs=CONFIGS, verbose=ARGS.verbose
-)
-# dropped-trial bookkeeping -------------------------------------------------
-test_df = stim_order.query("partition == 'stim_test'")
-train_df = stim_order.query("partition == 'stim_train'")
-
-test_keep = compute_dropped_trials(epoched_test, test_df, verbose=ARGS.verbose)
-train_keep = compute_dropped_trials(
-    epoched_train, train_df, verbose=ARGS.verbose
+train_data_path = os.path.join(
+    ARGS.project_dir, "preprocessed_data", ARGS.dataset, f"sub-{ARGS.sub:02d}", f"preprocessed_eeg_training_flat.npy"
 )
 
-stim_order["dropped"] = True
-stim_order.loc[test_keep, "dropped"] = False
-stim_order.loc[train_keep, "dropped"] = False
+meta_path = os.path.join(
+    ARGS.project_dir, "preprocessed_data", ARGS.dataset, f"sub-{ARGS.sub:02d}", f"experiment_metadata.parquet"
+)
+
+# Load data
+epoched_test = np.load(test_data_path, allow_pickle = True)  # shape: (n_trials, n_channels, n_times)
+epoched_train = np.load(train_data_path, allow_pickle = True)  # shape: (n_trials, n_channels, n_times)
+
+stim_order = pd.read_parquet(meta_path)
+
 
 train_df = stim_order[
     (stim_order["partition"] == "stim_train") & ~stim_order["dropped"]
 ].reset_index(drop=True)
+
 test_df = stim_order[
     (stim_order["partition"] == "stim_test") & ~stim_order["dropped"]
 ].reset_index(drop=True)
 
+print(len(test_df))
+
+print(epoched_test['preprocessed_eeg_data'].shape)
+
+# df = df[df['partition'] == f"stim_{ARGS.dataset_split}"]
+
+# Classifier pipeline
+flatten = FunctionTransformer(lambda x: x.reshape(x.shape[0], -1) if x.ndim > 2 else x)
 
 categories_lib = get_categories()
 
@@ -249,10 +247,16 @@ clf = Pipeline(
         ("LDA", lda),
     ]
 )
+
+clf = Pipeline([
+    ('flatten', flatten),
+    ('LDA', lda)
+])
+
 classifier = clf
 
-epoched_test = np.concatenate([x.get_data() for x in epoched_test], axis=0)
-epoched_train = np.concatenate([x.get_data() for x in epoched_train], axis=0)
+epoched_test = epoched_test['preprocessed_eeg_data']
+epoched_train = epoched_train['preprocessed_eeg_data']
 
 
 def run_cat_pairs(
@@ -265,7 +269,11 @@ def run_cat_pairs(
     test_df,
     categories_lib,
     classifier,
+    dataset = ""
 ):
+    types = f"{cat1}, {cat2}"
+    # if dataset == "Alljoined-1.6M":
+    #     dataset = ""
 
     train_A, train_B, test_A, test_B = prep_decoding_data_hierarchical(
         merged_train,
@@ -274,9 +282,8 @@ def run_cat_pairs(
         [cat2],
         train_df,
         test_df,
-        categories_lib,
+        categories_lib
     )
-    types = f"{cat1}, {cat2}"
     if train_A.shape[0] == 0:
         raise ValueError(f"No train data for category: {cat1}")
     if train_B.shape[0] == 0:
@@ -285,6 +292,11 @@ def run_cat_pairs(
         raise ValueError(f"No test data for category: {cat1}")
     if test_B.shape[0] == 0:
         raise ValueError(f"No test data for category: {cat2}")
+
+    
+
+    # import sys
+    # sys.exit()
 
     acc = run_LDA(
         train_A,
@@ -296,15 +308,15 @@ def run_cat_pairs(
         step=1,
     )
 
-    sum_accs = np.array([result["accuracy"] for result in acc])
+    sum_accs = np.array([result["AUC"] for result in acc])
 
     out_dict = {}
     out_dict[f"{cat1}_vs_{cat2}"] = sum_accs
 
     # # Save results
-    os.makedirs(f"results", exist_ok=True)
+    os.makedirs(f"results_{dataset}", exist_ok=True)
     with open(
-        f"results/semantic_snr_results_{sub}_{types}.pkl",
+        f"results_{dataset}/semantic_snr_results_{sub}_{types}.pkl",
         "wb",
     ) as f:
         pickle.dump(out_dict, f)
@@ -319,24 +331,44 @@ def run_cat_pairs(
     )  # Calculating the begginnig as the data will start not a time 0 but at time 1 or 2, depending on resampling
     plt.plot(times[start:], sum_accs, label=f"{types}", linewidth=2)
     plt.xlabel("Time (ms)")
-    plt.ylabel("Accuracy")
-    plt.title(f"LDA Decoding Accuracy: Subject {sub} {types}")
+    plt.ylabel("AUC")
+    plt.title(f"LDA Decoding AUC:{dataset} Subject {sub} {types}")
     plt.grid(True, linestyle="--", alpha=0.4)
     plt.legend()
 
     # Save figure
     os.makedirs(f"figs", exist_ok=True)
-    plt.savefig(f"figs/LDA Decoding Accuracy: Subject {sub} {types}.png")
+    plt.savefig(f"figs/LDA Decoding AUC:{dataset} Subject {sub} {types}.png")
 
 
-run_cat_pairs(
-    SUB,
-    epoched_train,
-    epoched_test,
-    cat1,
-    cat2,
-    train_df,
-    test_df,
-    categories_lib,
-    classifier,
-)
+for cat1, cat2 in category_pairs:
+
+    types = f"{cat1}, {cat2}"
+    # if dataset == "Alljoined-1.6M":
+    #     dataset = ""
+    filename = f"results_{dataset}/semantic_snr_results_{SUB}_{types}.pkl"
+
+    if os.path.exists(filename):
+        print(f"File {filename} exists, not running.")
+        
+    else:
+        print(f"File {filename} does not exist, running")
+        #try:
+        run_cat_pairs(
+            SUB,
+            epoched_train,
+            epoched_test,
+            cat1,
+            cat2,
+            train_df,
+            test_df,
+            categories_lib,
+            classifier,
+            dataset
+        )
+
+        # except Exception as e:
+        #     print(f"Error processing {dataset} sub {SUB}, {types}: {e}")
+        #     continue
+
+        
