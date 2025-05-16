@@ -166,7 +166,7 @@ SUB = ARGS.sub
 CONFIGS = _make_configs_from_args(ARGS)
 
 OUTPUT_DIR = (
-    PROJECT_DIR / "preprocessed_data" / "Alljoined-1.7M" / f"sub-{SUB:02d}"
+    PROJECT_DIR / "preprocessed_data" / "Alljoined-1.6M" / f"sub-{SUB:02d}"
 )
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

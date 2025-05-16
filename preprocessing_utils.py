@@ -205,7 +205,7 @@ def epoching(
         sub (int): Subject identifier (1-based; *not* zero-padded).
         blocks (Iterable[int]): Block indices **within** a session (1-based).
         project_dir (str): Base directory containing
-            ``raw_eeg/Alljoined-1.7M``.
+            ``raw_eeg/Alljoined-1.6M``.
         configs (Configs, optional): Pre-processing configuration.
             Defaults to ``DEFAULT_CONFIGS``.
         verbose (bool, optional): Forwarded to low-level MNE functions.
@@ -225,16 +225,21 @@ def epoching(
         data_dir = os.path.join(
             project_dir,
             "raw_eeg",
-            "Alljoined-1.7M",
+            "Alljoined-1.6M",
             f"sub-{sub:02d}",
             f"session_{sess:02d}",
         )
-        raws = [
-            read_eeg_data(
-                os.path.join(data_dir, f"block_{idx:02d}"), verbose=verbose
-            )
-            for idx in blocks
-        ]
+        raws = []
+        for idx in blocks:
+            try:
+                raws.append(
+                    read_eeg_data(
+                        os.path.join(data_dir, f"block_{idx:02d}"),
+                        verbose=verbose,
+                    )
+                )
+            except FileNotFoundError as e:
+                print(e)
 
         # Filter and make annotation descriptions unique
         for b_idx, raw in enumerate(raws, start=1):
@@ -254,8 +259,7 @@ def epoching(
                     orig_time=a.orig_time,
                 )
             )
-
-        raw_concat = mne.concatenate_raws(raws)
+        raw_concat = mne.concatenate_raws(raws) if len(raws) > 1 else raws[0]
         events, event_id = mne.events_from_annotations(
             raw_concat, regexp=".*stim", verbose=False
         )
@@ -318,6 +322,8 @@ def compute_dropped_trials(
 
         indices: List[int] = []
         ptr = 0  # pointer into img_idx_arr
+        print(img_idx_arr)
+        print(trigger_vals)
         for val in trigger_vals:
             while ptr < len(img_idx_arr) and img_idx_arr[ptr] != val:
                 ptr += 1
