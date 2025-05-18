@@ -270,7 +270,6 @@ def get_words_in_categories(categories_spec, hierarchy):
 
 def average_trials(data, labels, average_trials=5, max_sampling=1000):
 
-    # print(f'Start Averaging {average_trials} Trials with Sampling {max_sampling}')
     if average_trials < 2:
         averaged_data = data
         averaged_labels = labels
