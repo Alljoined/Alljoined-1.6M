@@ -1,5 +1,8 @@
 # Alljoined-1.6M
 
+- **Dataset:** https://huggingface.co/datasets/Alljoined/Alljoined-1.6M
+- **Paper:** https://arxiv.org/abs/2508.18571
+
 ## Setup
 
 **Before setting up the environment, ensure you have `mamba` installed.** 

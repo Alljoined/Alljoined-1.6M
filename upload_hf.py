@@ -56,7 +56,6 @@ api.upload_file(
 # PATTERNS = [
 #     "**/mvnn_whitening_matrices.pkl",
 #     "**/experiment_metadata.parquet",
-#     "**/stim_order.parquet",
 #     "**/metadata.parquet",
 # ]
 
