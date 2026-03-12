@@ -1,6 +1,7 @@
 import argparse
 import dataclasses
 import inspect
+import json
 import os
 import pickle
 import sys
@@ -65,6 +66,145 @@ class Configs:
     mvnn_dim: str = "epochs"
     reject: Optional[Dict[str, float]] = None
     verbose: bool = False
+
+
+###############################################################################
+# PARSING UTILS AND CLI
+###############################################################################
+
+
+def _parse_float_tuple(text: str) -> Tuple[float | None, float]:
+    """Parse 'None,0' or '-0.2,0' → (None, 0.0) or (-0.2, 0.0)."""
+    a, b = [x.strip() for x in text.split(",")]
+    return (None if a.lower() == "none" else float(a), float(b))
+
+
+def _parse_reject(text: str) -> Dict[str, float]:
+    """
+    Parse JSON or 'EEG001:1e-4,EEG002:1.2e-4' → {'EEG001': 1e-4, 'EEG002': 1.2e-4}
+    """
+    if text.lstrip().startswith("{"):
+        return json.loads(text)
+    out: Dict[str, float] = {}
+    for pair in text.split(","):
+        ch, thr = pair.split(":")
+        out[ch.strip()] = float(thr)
+    return out
+
+
+def _mvnn_arg(text: str) -> str | None:
+    """Return 'epochs', 'time', or None (for the string 'none')."""
+    t = text.lower()
+    if t == "none":
+        return None
+    if t in {"epochs", "time"}:
+        return t
+    raise argparse.ArgumentTypeError(
+        "mvnn_dim must be 'epochs', 'time', or 'None'"
+    )
+
+
+def make_configs_from_args(args: argparse.Namespace) -> Configs:
+    """Instantiate a Configs object from parsed CLI args."""
+    return Configs(
+        baseline=args.baseline,
+        tmin=args.tmin,
+        tmax=args.tmax,
+        sfreq=args.sfreq,
+        l_freq=args.l_freq,
+        h_freq=args.h_freq,
+        notch_freqs=args.notch_freqs,
+        mvnn_dim=args.mvnn_dim,
+        reject=args.reject,
+    )
+
+
+def get_preprocessing_parser():
+    parser = argparse.ArgumentParser(
+        prog="preprocessing.py",
+        description=(
+            "Preprocess EEG data for a specific subject: epoching, filtering, "
+            "MVNN, and saving."
+        ),
+    )
+
+    # required
+    parser.add_argument(
+        "-s",
+        "--sub",
+        required=True,
+        type=int,
+        help="Subject number (e.g.  1 for sub-01)",
+    )
+
+    # Configs-related ----------------------------------------------------------
+    parser.add_argument(
+        "--tmin",
+        type=float,
+        default=-0.2,
+        help="Epoch start (seconds, default -0.2)",
+    )
+    parser.add_argument(
+        "--tmax",
+        type=float,
+        default=1.0,
+        help="Epoch end (seconds, default 1.0)",
+    )
+    parser.add_argument(
+        "--baseline",
+        type=_parse_float_tuple,
+        default="None,0",
+        help=(
+            'Baseline tuple "None,0" or "-0.2,0" (use None for '
+            "no pre-stim baseline)"
+        ),
+    )
+    parser.add_argument(
+        "--sfreq",
+        type=int,
+        default=250,
+        help="Target sampling rate after downsampling (Hz)",
+    )
+    parser.add_argument(
+        "--l_freq", type=float, help="Low cutoff for band-pass filter (Hz)"
+    )
+    parser.add_argument(
+        "--h_freq", type=float, help="High cutoff for band-pass filter (Hz)"
+    )
+    parser.add_argument(
+        "--notch_freqs",
+        nargs="+",
+        type=float,
+        help="One or more notch filter frequencies (Hz)",
+    )
+    parser.add_argument(
+        "--reject",
+        type=_parse_reject,
+        help=(
+            'Artifact-rejection dict; JSON or "CH1:thr,CH2:thr" '
+            '(mV, e.g. "EEG001:1e-4").'
+        ),
+    )
+    parser.add_argument(
+        "--mvnn_dim",
+        type=_mvnn_arg,
+        default="epochs",
+        help="MVNN mode (off to skip whitening)",
+    )
+
+    # misc ---------------------------------------------------------------------
+    parser.add_argument(
+        "--project_dir",
+        default="/srv/eeg_reconstruction/shared/data/",
+        help="Root of the project directory tree",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose output during preprocessing",
+    )
+
+    return parser
 
 
 DEFAULT_CONFIGS = Configs()
@@ -302,9 +442,13 @@ def compute_dropped_trials(
             triggers. Defaults to ``False``.
 
     Returns:
-        np.ndarray: A 1-D array of row indices (into ``stim_order``) that
-        survived all trigger-matching checks across sessions.
+        the stim_order DataFrame with a new column ``dropped`` that is ``True``
+        for trials that were dropped (i.e. not present in the EEG trigger
+        sequence).
     """
+
+    stim_order = stim_order.copy(deep=True)
+
     print("Computing dropped trials...")
     kept_indices: List[int] = []
     for sess in SESSIONS:
@@ -322,8 +466,6 @@ def compute_dropped_trials(
 
         indices: List[int] = []
         ptr = 0  # pointer into img_idx_arr
-        print(img_idx_arr)
-        print(trigger_vals)
         for val in trigger_vals:
             while ptr < len(img_idx_arr) and img_idx_arr[ptr] != val:
                 ptr += 1
@@ -340,7 +482,9 @@ def compute_dropped_trials(
             _warn(f"{n_dropped} triggers dropped in session {sess}")
 
         kept_indices.extend(indices)
-    return np.array(kept_indices)
+
+    stim_order["dropped"] = ~stim_order.index.isin(kept_indices)
+    return stim_order
 
 
 def compute_whitening_matrix(

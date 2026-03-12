@@ -31,13 +31,21 @@ def process_window(
     train_y = np.array([1] * train_A.shape[0] + [2] * train_B.shape[0])
     test_y = np.array([1] * test_A.shape[0] + [2] * test_B.shape[0])
 
-    max_size_train = max(train_A.shape[0],train_B.shape[0]) # get the minimum size of data, ideally not
-    max_size_test = max(test_A.shape[0],test_B.shape[0]) # get the minimum size of data, ideally not
+    max_size_train = max(
+        train_A.shape[0], train_B.shape[0]
+    )  # get the minimum size of data, ideally not
+    max_size_test = max(
+        test_A.shape[0], test_B.shape[0]
+    )  # get the minimum size of data, ideally not
 
-    #print("Calculating Averages")
+    # print("Calculating Averages")
 
-    train_x, train_y = average_trials(train_x, train_y, average_trials=10, max_sampling = max_size_train)  
-    test_x, test_y = average_trials(test_x, test_y, average_trials=10, max_sampling = max_size_test) 
+    train_x, train_y = average_trials(
+        train_x, train_y, average_trials=10, max_sampling=max_size_train
+    )
+    test_x, test_y = average_trials(
+        test_x, test_y, average_trials=10, max_sampling=max_size_test
+    )
 
     if np.ndim(train_x) > 2:
         train_x = train_x.reshape(
@@ -153,10 +161,6 @@ def prep_decoding_data_hierarchical(
     train_df_b = train_df[train_df[word_column].isin(words_b)]
     test_df_a = test_df[test_df[word_column].isin(words_a)]
     test_df_b = test_df[test_df[word_column].isin(words_b)]
-    print(train_df_a)
-    print(train_df_b)
-    print(test_df_a)
-    print(test_df_b)
 
     # --- Extract Data Using Original Epoch Indices ---
     train_indices_a = train_df_a.index
@@ -264,10 +268,8 @@ def get_words_in_categories(categories_spec, hierarchy):
     return list(final_words)
 
 
+def average_trials(data, labels, average_trials=5, max_sampling=1000):
 
-def average_trials(data, labels, average_trials=5,max_sampling=1000):
-
-    #print(f'Start Averaging {average_trials} Trials with Sampling {max_sampling}')
     if average_trials < 2:
         averaged_data = data
         averaged_labels = labels
@@ -285,9 +287,11 @@ def average_trials(data, labels, average_trials=5,max_sampling=1000):
             # Loop over the data and collect averages with substitution
             for _ in range(int(max_sampling)):
                 # Sample with replacement
-                indices = np.random.choice(label_data.shape[0], 5, replace=True)
+                indices = np.random.choice(
+                    label_data.shape[0], 5, replace=True
+                )
                 batch_data = label_data[indices]
-                
+
                 # Compute average and append to list
                 averaged_trial = np.mean(batch_data, axis=0)
                 averaged_data.append(averaged_trial)
